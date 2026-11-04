@@ -1,3 +1,8 @@
 "*.pdf"
 "*.pth"
 "*.png"
+*.log
+*.pyc
+*pth
+.env
+*.pdf
