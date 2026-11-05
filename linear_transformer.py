@@ -12,6 +12,7 @@
 import torch
 from torch import nn
 import numpy as np
+import math
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -33,12 +34,12 @@ def attention(P,Q,Z, activation = None):
     B= Z.shape[0]
     N = Z.shape[1]-1
     d = Z.shape[2]-1
-    P_full =  torch.cat([P,torch.zeros(1,d).to(device)],dim=0)
-    P_full =  torch.cat([P_full,torch.zeros(d+1,1).to(device)],dim=1)
+    P_full =  torch.cat([P,torch.zeros(1,d, device=Z.device, dtype=Z.dtype)],dim=0)
+    P_full =  torch.cat([P_full,torch.zeros(d+1,1, device=Z.device, dtype=Z.dtype)],dim=1)
     P_full[d,d] = 1
-    Q_full = torch.cat([Q, torch.zeros(1,d).to(device)],dim=0)
-    Q_full = torch.cat([Q_full, torch.zeros(d+1,1).to(device)],dim=1)
-    A = torch.eye(N+1).to(device)
+    Q_full = torch.cat([Q, torch.zeros(1,d, device=Z.device, dtype=Z.dtype)],dim=0)
+    Q_full = torch.cat([Q_full, torch.zeros(d+1,1, device=Z.device, dtype=Z.dtype)],dim=1)
+    A = torch.eye(N+1, device=Z.device, dtype=Z.dtype)
     A[N,N] = 0
     Attn = torch.einsum('BNi, ij, BMj -> BNM', (Z,Q_full,Z))
     if activation is not None:
@@ -84,6 +85,37 @@ class Transformer_F(nn.Module):
             for j in range(self.n_head):
                 with torch.no_grad():
                     self.allparam[i,j,0,:,:].zero_()
+
+
+# The Looped Linear Transformer module.
+# It repeatedly applies the same residual-attention block, sharing parameters
+# across all loops. The leading allparam dimension is kept at size 1 so that
+# the stored P/Q matrices follow the same layout as Transformer_F.
+class Transformer_F_Looped(nn.Module):
+    def __init__(self, n_loop, n_head, d, var):
+        super(Transformer_F_Looped, self).__init__()
+        self.register_parameter('allparam', torch.nn.Parameter(torch.zeros(1, n_head, 2, d, d)))
+        with torch.no_grad():
+            self.allparam.normal_(0, var)
+        self.n_loop = n_loop
+        self.n_head = n_head
+
+    def forward(self, Z):
+        for _ in range(self.n_loop):
+            Zi = Z
+            residues = 0
+            for j in range(self.n_head):
+                Pij = self.allparam[0, j, 0, :, :]
+                Qij = self.allparam[0, j, 1, :, :]
+                residues = residues + attention(Pij, Qij, Zi)
+            Z = Zi + residues
+        return Z
+
+    # Enforces top-left-dxd-block sparsity on P for the shared block.
+    def zero_p(self):
+        for j in range(self.n_head):
+            with torch.no_grad():
+                self.allparam[0, j, 0, :, :].zero_()
 
 # evaluate the loss of model, given data (Z,y)
 def in_context_loss(model, Z, y):
