@@ -34,12 +34,12 @@ def attention(P,Q,Z, activation = None):
     B= Z.shape[0]
     N = Z.shape[1]-1
     d = Z.shape[2]-1
-    P_full =  torch.cat([P,torch.zeros(1,d, device=Z.device, dtype=Z.dtype)],dim=0)
-    P_full =  torch.cat([P_full,torch.zeros(d+1,1, device=Z.device, dtype=Z.dtype)],dim=1)
+    P_full =  torch.cat([P,torch.zeros(1,d).to(device)],dim=0)
+    P_full =  torch.cat([P_full,torch.zeros(d+1,1).to(device)],dim=1)
     P_full[d,d] = 1
-    Q_full = torch.cat([Q, torch.zeros(1,d, device=Z.device, dtype=Z.dtype)],dim=0)
-    Q_full = torch.cat([Q_full, torch.zeros(d+1,1, device=Z.device, dtype=Z.dtype)],dim=1)
-    A = torch.eye(N+1, device=Z.device, dtype=Z.dtype)
+    Q_full = torch.cat([Q, torch.zeros(1,d).to(device)],dim=0)
+    Q_full = torch.cat([Q_full, torch.zeros(d+1,1).to(device)],dim=1)
+    A = torch.eye(N+1).to(device)
     A[N,N] = 0
     Attn = torch.einsum('BNi, ij, BMj -> BNM', (Z,Q_full,Z))
     if activation is not None:
@@ -119,11 +119,16 @@ class Transformer_F_Looped(nn.Module):
 
 # evaluate the loss of model, given data (Z,y)
 def in_context_loss(model, Z, y):
-    N = Z.shape[1]-1
-    d = Z.shape[2]-1
+    N = Z.shape[1] - 1
+    d = Z.shape[2] - 1
     output = model(Z)
-    diff = output[:,N,d]+y
-    loss = ((diff)**2).mean() 
+    diff = output[:,N,d] + y
+
+    # FIXME: Will likely want to revise this to be less restrictive - I added this to prevent the computed loss being set to `inf`
+    clamped_diff = torch.nan_to_num(torch.clamp(diff, -5, 5), nan=0.0)
+
+    loss = ((clamped_diff)**2).mean()
+
     return loss
         
 # generate random data for linear regression
