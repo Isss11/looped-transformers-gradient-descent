@@ -168,7 +168,7 @@ def generate_data(mode='normal',N=20,d=1,B=1000,shape_k=0.1, U=None, D=None):
         # scale by gamma
         X.mul_(gamma_scales[:,:,None])
         X_test.mul_(gamma_test_scales[:,:,None])
-    elif mode =='normal':
+    elif mode == 'normal':
         assert True
     elif mode == 'relu':
         return generate_data_relu(N=N, d=d, B=B, hidden_dim=d)
