@@ -40,7 +40,7 @@ Setting: training 3 layer linear transformer with Adam/SGD (with clipping), cova
 
 ### Hyperparameters
 
-`mode`: method of generating samples (`['normal', 'sphere', 'gamma']`)
+`mode`: method of generating samples (`['normal', 'sphere', 'gamma', 't']`). Configure Student-t degrees of freedom with `DataMode('t', t_degrees_freedom=5)`.
 
 `alg`: Optimization algorithm (`['sgd', 'adam']`)
 

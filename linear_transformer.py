@@ -13,6 +13,15 @@ import torch
 from torch import nn
 import numpy as np
 import math
+from dataclasses import dataclass
+
+# Define data mode class to easily handle different configurations
+@dataclass(frozen=True)
+class DataMode:
+    name: str
+    gamma_shape: float | None = None
+    gamma_scale: float | None = None
+    t_degrees_freedom: int | None = None
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -34,16 +43,19 @@ def attention(P,Q,Z, activation = None):
     B= Z.shape[0]
     N = Z.shape[1]-1
     d = Z.shape[2]-1
+
     P_full =  torch.cat([P,torch.zeros(1,d).to(device)],dim=0)
     P_full =  torch.cat([P_full,torch.zeros(d+1,1).to(device)],dim=1)
     P_full[d,d] = 1
     Q_full = torch.cat([Q, torch.zeros(1,d).to(device)],dim=0)
     Q_full = torch.cat([Q_full, torch.zeros(d+1,1).to(device)],dim=1)
+
     A = torch.eye(N+1).to(device)
     A[N,N] = 0
     Attn = torch.einsum('BNi, ij, BMj -> BNM', (Z,Q_full,Z))
     if activation is not None:
         Attn = activation(Attn)
+
     key = torch.einsum('ij, BNj -> BNi', (P_full,Z))
     Output = torch.einsum('BNM,ML, BLi -> BNi', (Attn,A,key))
     return Output /N
@@ -132,13 +144,11 @@ def in_context_loss(model, Z, y):
     return loss
         
 # generate random data for linear regression
-# mode: distribution of samples to generate. Currently supports 'normal', 'gamma', 'sphere'
+# mode: Supports 'normal', 'gamma', 'sphere', and 't'. Of type "DataMode",
+#       with configurable Gamma parameters or Student-t degrees of freedom.
 # N: number of context examples
 # d: dimension of covariates
-# For gamma distribution:
-# - shape_k: shape parameter of gamma distribution (unused otherwise)
-# - scale parameter: hard coded so that when shape_k = 5/2 and d=5, the generated data is standard normal
-def generate_data(mode='normal',N=20,d=1,B=1000,shape_k=0.1, U=None, D=None):
+def generate_data(mode: DataMode = DataMode("normal"), N=20, d=1, B=1000, U=None, D=None):
     W= torch.FloatTensor(B, d).normal_(0,1).to(device)
     X = torch.FloatTensor(B, N, d).normal_(0, 1).to(device)
     X_test = torch.FloatTensor(B,1,d).normal_(0, 1).to(device)
@@ -150,30 +160,52 @@ def generate_data(mode='normal',N=20,d=1,B=1000,shape_k=0.1, U=None, D=None):
         W = torch.mm(W,torch.inverse(D))
         W = torch.mm(W,U.t())
     
-    if mode =='sphere':
+    if mode.name =='sphere':
         X.div_(X.norm(p=2,dim=2)[:,:,None])
         X_test.div_(X_test.norm(p=2,dim=2)[:,:,None])
-    elif mode == 'gamma':
+    elif mode.name == 'gamma':
         # random gamma scaling for X
-        gamma_scales = np.random.gamma(shape=shape_k, scale=(10/shape_k)**(0.5), size=[B,N])
+        gamma_scales = np.random.gamma(shape=mode.gamma_shape, scale=mode.gamma_scale, size=[B,N])
         gamma_scales = torch.Tensor(gamma_scales).to(device)
         gamma_scales = gamma_scales.sqrt()
+
         # random gamma scaling for X_test
-        gamma_test_scales = np.random.gamma(shape=shape_k, scale=(10/shape_k)**(0.5), size=[B,1])
+        gamma_test_scales = np.random.gamma(shape=mode.gamma_shape, scale=mode.gamma_scale, size=[B,1])
         gamma_test_scales = torch.Tensor(gamma_test_scales).to(device)
         gamma_test_scales = gamma_test_scales.sqrt()
+
         # normalize to unit norm
         X.div_(X.norm(p=2,dim=2)[:,:,None])
         X_test.div_(X_test.norm(p=2,dim=2)[:,:,None])
+
         # scale by gamma
         X.mul_(gamma_scales[:,:,None])
         X_test.mul_(gamma_test_scales[:,:,None])
-    elif mode == 'normal':
+    elif mode.name == 't':
+        degrees_freedom = mode.t_degrees_freedom
+        if degrees_freedom is None or degrees_freedom <= 0:
+            raise ValueError("t mode requires positive t_degrees_freedom")
+
+        # A multivariate Student-t sample is normal data scaled by a shared
+        # inverse chi-square variable for each example.
+        chi_square_scales = torch.as_tensor(
+            np.random.chisquare(df=degrees_freedom, size=[B, N]),
+            dtype=X.dtype,
+            device=device,
+        )
+        chi_square_test_scales = torch.as_tensor(
+            np.random.chisquare(df=degrees_freedom, size=[B, 1]),
+            dtype=X_test.dtype,
+            device=device,
+        )
+        X.mul_((degrees_freedom / chi_square_scales).sqrt()[:, :, None])
+        X_test.mul_((degrees_freedom / chi_square_test_scales).sqrt()[:, :, None])
+    elif mode.name == 'normal':
         assert True
-    elif mode == 'relu':
+    elif mode.name == 'relu':
         return generate_data_relu(N=N, d=d, B=B, hidden_dim=d)
-    elif mode == 'mlp':
-        generate_data_mlp(N=N, d=d, B=B, hidden_dim=d)
+    elif mode.name == 'mlp':
+        return generate_data_mlp(N=N, d=d, B=B, hidden_dim=d)
     else:
         assert False
         
@@ -184,14 +216,13 @@ def generate_data(mode='normal',N=20,d=1,B=1000,shape_k=0.1, U=None, D=None):
     y = torch.einsum('bi,bni->bn', (W, X)).unsqueeze(2)
     y_zero = torch.zeros(B,1,1).to(device)
     y_test = torch.einsum('bi,bni->bn', (W, X_test)).squeeze(1)
-    X_comb= torch.cat([X,X_test],dim=1)
-    y_comb= torch.cat([y,y_zero],dim=1)
-    Z= torch.cat([X_comb,y_comb],dim=2)
-    return Z.to(device),y_test.to(device)
+    X_comb = torch.cat([X,X_test], dim=1)
+    y_comb = torch.cat([y,y_zero], dim=1)
+    Z = torch.cat([X_comb,y_comb], dim=2)
+
+    return Z.to(device), y_test.to(device)
 
 def generate_data_inplace(Z, U=None, D=None):
-    
-    
     B = Z.shape[0]
     N = Z.shape[1]-1
     d = Z.shape[2]-1
@@ -229,8 +260,6 @@ def generate_data_relu(mode='normal', N=20, d=1, B=1000, shape_k=0.1, U=None, D=
     X = torch.FloatTensor(B, N, d).normal_(0, 1).to(device)
     X_test = torch.FloatTensor(B, 1, d).normal_(0, 1).to(device)
 
-    # Additional transformations if mode is 'sphere' or 'gamma' [Similar to the existing generate_data function]
-
     # Define a 1-hidden layer ReLU network
     model = nn.Sequential(
         nn.Linear(d, hidden_dim),
@@ -255,8 +284,6 @@ def generate_data_mlp(N=20, d=1, B=1000, hidden_dim=100):
     # Generate random input data
     X = torch.FloatTensor(B, N, d).normal_(0, 1).to(device)
     X_test = torch.FloatTensor(B, 1, d).normal_(0, 1).to(device)
-
-    # Additional transformations if mode is 'sphere' or 'gamma' [Similar to the existing generate_data function]
 
     # Define a 1-hidden layer ReLU network
     model = nn.Sequential(

@@ -2,16 +2,12 @@
 
 ## Additional Changes
 
-- Display parameter graphs for looped models correctly, as well as the distance to identity graphs.
+- I think we should test across different seeds, instead of just one.
+- Investigate NaN gradients.
 
 ## Different Distributions Test
 
-- Implement student's t-distribution with configurable parameters.
-- Revise the training distribution to take appropriate parameters for gamma, t-distribution and pass them to the data generator.
-- Revise the data generator to implement configurable gamma parameters for shape.
-- Expand the simulations to include two H/L configurations for the gamma distribution and the t-distribution.
-- Expand simulations to test on normal, gamma, and t-distribution data after training on the 5 types of distributions, and plot all 5 comparison graphs.
-- Display parameter graphs.
+Done.
 
 ## Non-Linear Distribution Test
 
@@ -19,17 +15,17 @@
 - Test to see if convergence occurs.
 - Display parameter graphs.
 
+## Conditional Number
+
+- Verify implementation, see if conditional number is being set correctly.
+- Compare performance with normal distribution.
+
 ## Softmax Attention
 
 - Implement softmax attention
 - Test against regular attention, compare convergence graphs.
 - Do we still see the phenomen after looping above the loops it was trained on? Test for this.
 - Display parameter graphs.
-
-## Conditional Number
-
-- Verify implementation, see if conditional number is being set correctly.
-- Compare performance with normal distribution.
 
 ## Unconstraining P & Q
 
