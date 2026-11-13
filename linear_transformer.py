@@ -53,12 +53,20 @@ def attention(P,Q,Z, activation = None):
     A = torch.eye(N+1).to(device)
     A[N,N] = 0
     Attn = torch.einsum('BNi, ij, BMj -> BNM', (Z,Q_full,Z))
+
+    # Exclude the query token before softmax normalization so its probability
+    # mass is redistributed across the context tokens.
+    # TODO: Double check that this is correct
+    if isinstance(activation, nn.Softmax) and activation.dim == 2:
+        Attn[:, :, N] = -torch.inf
+
     if activation is not None:
         Attn = activation(Attn)
 
     key = torch.einsum('ij, BNj -> BNi', (P_full,Z))
     Output = torch.einsum('BNM,ML, BLi -> BNi', (Attn,A,key))
-    return Output /N
+
+    return Output / N
 
 
 # The Linear Transformer module
@@ -71,13 +79,14 @@ def attention(P,Q,Z, activation = None):
 # - P matrix at layer i, head j is allparam[i,j,0,:,:]
 # - Q matrix at layer i, head j is allparam[i,j,1,:,:]
 class Transformer_F(nn.Module):
-    def __init__(self, n_layer, n_head, d, var):
+    def __init__(self, n_layer, n_head, d, var, activation=None):
         super(Transformer_F, self).__init__()
         self.register_parameter('allparam', torch.nn.Parameter(torch.zeros(n_layer, n_head, 2, d, d)))
         with torch.no_grad():
             self.allparam.normal_(0,var)
         self.n_layer = n_layer
         self.n_head = n_head
+        self.activation = activation
 
     def forward(self, Z):
         for i in range(self.n_layer):
@@ -87,7 +96,7 @@ class Transformer_F(nn.Module):
             for j in range(self.n_head):
                 Pij = self.allparam[i,j,0,:,:]
                 Qij = self.allparam[i,j,1,:,:]
-                residues = residues + attention(Pij,Qij,Zi)
+                residues = residues + attention(Pij, Qij, Zi, activation=self.activation)
             Z = Zi + residues
         return Z
     
@@ -104,13 +113,14 @@ class Transformer_F(nn.Module):
 # across all loops. The leading allparam dimension is kept at size 1 so that
 # the stored P/Q matrices follow the same layout as Transformer_F.
 class Transformer_F_Looped(nn.Module):
-    def __init__(self, n_loop, n_head, d, var):
+    def __init__(self, n_loop, n_head, d, var, activation=None):
         super(Transformer_F_Looped, self).__init__()
         self.register_parameter('allparam', torch.nn.Parameter(torch.zeros(1, n_head, 2, d, d)))
         with torch.no_grad():
             self.allparam.normal_(0, var)
         self.n_loop = n_loop
         self.n_head = n_head
+        self.activation = activation
 
     def forward(self, Z):
         for _ in range(self.n_loop):
@@ -119,7 +129,7 @@ class Transformer_F_Looped(nn.Module):
             for j in range(self.n_head):
                 Pij = self.allparam[0, j, 0, :, :]
                 Qij = self.allparam[0, j, 1, :, :]
-                residues = residues + attention(Pij, Qij, Zi)
+                residues = residues + attention(Pij, Qij, Zi, activation=self.activation)
             Z = Zi + residues
         return Z
 

@@ -20,20 +20,16 @@ Done.
 
 Done.
 
-## Conditional Number - *Priority 2*
+## Conditional Number - *Priority 1*
 
 - Verify implementation, see if conditional number is being set correctly.
 - Compare performance with normal distribution.
 
-## Softmax Attention - *Priority 1*
+## Softmax Attention*
 
-- Implement softmax attention -- is it preconditioned?
-- Test against linear attention, compare convergence graphs.
-    - Might be good to compare this against research.
-- Do we still see the phenomen after looping above the loops it was trained on? Test for this.
-- Display parameter graphs.
+Done.
 
-## Unconstraining P & Q - *Priority 3*
+## Unconstraining P & Q - *Priority 2*
 
 - Look into unconstraining the bias term, as well as other terms if possible.
 - Implement and test against regular models across different loops.
@@ -50,12 +46,12 @@ Done.
 - Theoretical investigation.
 - Investigate the decrease in the loss rate.
 
-## $\delta$ Test - *Priority 6*
+## $\delta$ Test - *Priority 4*
 
 - Investigate what $\delta$ really means, to see if this experiment is feasible.
 - Modify values of $L$ and $N$ to see if they align with the estimation accuracy governed by $\delta$.
 
-## Gradient Flow - *Priority 5*
+## Gradient Flow - *Priority 3*
 
 1. Set error threshold.
 2. Evaluate if $A$ is in range of $A_{opt}$ (which I think is proxied by $I$).
