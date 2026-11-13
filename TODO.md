@@ -4,6 +4,7 @@
 
 - I think we should test across different seeds, instead of just one.
 - Investigate NaN gradients.
+- Fix colour scheme in graphs.
 
 ## Different Distributions Test
 
@@ -11,16 +12,14 @@ Done.
 
 ## Non-Linear Distribution Test
 
-- Implement on normal, ReLU generated data and MLP generated data.
-- Test to see if convergence occurs.
-- Display parameter graphs.
+Done.
 
 ## Conditional Number
 
 - Verify implementation, see if conditional number is being set correctly.
 - Compare performance with normal distribution.
 
-## Softmax Attention
+## Softmax Attention - *Priority 2*
 
 - Implement softmax attention
 - Test against regular attention, compare convergence graphs.
@@ -33,12 +32,12 @@ Done.
 - Implement and test against regular models across different loops.
 - Test looping for $L_{test} > L_{train}$.
 
-## Multiple Heads
+## Multiple Heads - *Priority 1*
 
 - Test with multiple heads, and see how that will effect results.
 - Compare against single head models for $1, 2, 5, 10$ layers.
 
-## $L_{test} > L_{train}$
+## $L_{test} > L_{train}$ - *Priority 3*
 - Investigate for even higher layers.
 - Theoretical investigation.
 
