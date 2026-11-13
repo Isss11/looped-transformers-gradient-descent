@@ -20,7 +20,7 @@ Done.
 
 Done.
 
-## Conditional Number - *Priority 1*
+## Conditional Number - *Priority 2*
 
 - Verify implementation, see if conditional number is being set correctly.
 - Compare performance with normal distribution.
@@ -29,7 +29,7 @@ Done.
 
 Done.
 
-## Unconstraining P & Q - *Priority 2*
+## Unconstraining P & Q - *Priority 1*
 
 - Look into unconstraining the bias term, as well as other terms if possible.
 - Implement and test against regular models across different loops.
