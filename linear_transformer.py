@@ -83,7 +83,7 @@ class Transformer_F(nn.Module):
         for i in range(self.n_layer):
             Zi = Z
             residues = 0
-            # the forwarad map of each layer is given by F(Z) = Z + attention(Z)
+            # the forward map of each layer is given by F(Z) = Z + attention(Z)
             for j in range(self.n_head):
                 Pij = self.allparam[i,j,0,:,:]
                 Qij = self.allparam[i,j,1,:,:]
