@@ -71,8 +71,13 @@ def build_transformer(model_type, count, head_count, d, var, attention_type='lin
     return model_class(count, head_count, d, var, activation=activation)
 
 
-# a convenience function for taking a step and clipping
-def clip_and_step(allparam, optimizer, clip_r = None):
+def step(allparam, optimizer, clip_r=None):
+    """Take an optimizer step, optionally clipping the gradient norm first.
+
+    With `clip_r=None` (default) no clipping is applied. Otherwise the gradient
+    is rescaled in place so its norm is at most `clip_r`. The step is skipped if
+    the gradient norm is not finite. Returns the pre-clipping gradient norm.
+    """
     grad_all = allparam.grad
     norm_p = grad_all.norm().item()
 
@@ -88,9 +93,18 @@ def clip_and_step(allparam, optimizer, clip_r = None):
 
 def run_experiment_suite(seeds, n_layers_loops, model_types, filename, context_lengths=None,
                          data_modes: list[DataMode] = None, head_counts: list[int] | None = None,
-                         attention_type='linear'):
+                         attention_type='linear', clip=True,
+                         freeze_p=False):  # [P-FIX] added freeze_p argument
     """
     Train every requested run and save all histories to `filename`.
+
+    `clip=True` clips gradient norms at the module-level `clip_r`; pass
+    `clip=False` to train without clipping.
+
+    [P-FIX] `freeze_p=True` zeroes and freezes the learnable top-left d x d block
+    of P, giving the Gatmiry et al. (2024) parameterization P = [[0, 0], [0, 1]]
+    (u = 0 always holds because the model has no u parameter). Only Q (= A) is
+    trained. The default `False` keeps the earlier behavior, where that block is trained.
 
     `context_lengths` defaults to [N], and `data_modes` defaults to [normal_data_mode].
     `head_counts` defaults to [n_head]. `attention_type` selects 'linear' (default)
@@ -114,6 +128,8 @@ def run_experiment_suite(seeds, n_layers_loops, model_types, filename, context_l
     if attention_type not in {'linear', 'softmax'}:
         raise ValueError(f'Unsupported attention type: {attention_type}')
 
+    run_clip_r = clip_r if clip else None
+
     base_keys = [(seed, count, model_type, context_length, data_mode, head_count)
                  for seed in seeds
                  for count in n_layers_loops
@@ -130,13 +146,18 @@ def run_experiment_suite(seeds, n_layers_loops, model_types, filename, context_l
     for run_index, key in enumerate(keys, start=1):
         seed, count, model_type, context_length, data_mode, head_count = key[:6]
         print(f'Run {run_index}/{len(keys)}: seed={seed}, count={count}, type={model_type}, '
-              f'N={context_length}, mode={data_mode}, heads={head_count}, attention={attention_type}')
+              f'N={context_length}, mode={data_mode}, heads={head_count}, attention={attention_type}, '
+              f'freeze_p={freeze_p}')  # [P-FIX] log freeze_p
         hist_dict[key] = []
 
         torch.manual_seed(seed)
         model = build_transformer(
             model_type, count, head_count, d, var, attention_type=attention_type,
         ).to(device)
+
+        # [P-FIX] Zero the random initialization of P's top-left block.
+        if freeze_p:
+            model.zero_p()
 
         if alg == 'sgd':
             optimizer = torch.optim.SGD(model.parameters(), lr=lr, momentum=0.9, weight_decay=0)
@@ -159,12 +180,20 @@ def run_experiment_suite(seeds, n_layers_loops, model_types, filename, context_l
 
             loss.backward()
 
-            grad_norm = clip_and_step(model.allparam, optimizer, clip_r=clip_r)
+            # [P-FIX] Drop the P gradient so the optimizer never updates P.
+            if freeze_p:
+                model.allparam.grad[:, :, 0].zero_()
+
+            grad_norm = step(model.allparam, optimizer, clip_r=run_clip_r)
 
             if not np.isfinite(grad_norm):
                 print(f'[DEBUG] [Norm]: infinite gradient norm at iteration {t}.')
 
             optimizer.zero_grad()
+
+            # [P-FIX] Safeguard: re-zero P after the optimizer step.
+            if freeze_p:
+                model.zero_p()
             end = time.time()
 
             # Only prints for the first 5 iterations, and then every 100 iterations
