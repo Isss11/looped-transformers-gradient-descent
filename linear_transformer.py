@@ -50,23 +50,32 @@ def attention(P,Q,Z, activation = None):
     Q_full = torch.cat([Q, torch.zeros(1,d).to(device)],dim=0)
     Q_full = torch.cat([Q_full, torch.zeros(d+1,1).to(device)],dim=1)
 
-    A = torch.eye(N+1).to(device)
-    A[N,N] = 0
     Attn = torch.einsum('BNi, ij, BMj -> BNM', (Z,Q_full,Z))
 
-    # Exclude the query token before softmax normalization so its probability
-    # mass is redistributed across the context tokens.
-    # TODO: Double check that this is correct
-    if isinstance(activation, nn.Softmax) and activation.dim == 2:
+    # The query token (index N) must not act as a key.
+    if isinstance(activation, nn.Softmax):
+        # Scale scores as in the original Transformer, then mask the query
+        # token with -inf so softmax gives it zero weight and normalizes
+        # over the N context tokens only.
+        Attn = Attn / (d ** 0.5)
         Attn[:, :, N] = -torch.inf
-
-    if activation is not None:
         Attn = activation(Attn)
+    else:
+        # Linear / ReLU attention: zero out the query token's column after
+        # the activation (out-of-place, so autograd through ReLU stays valid).
+        if activation is not None:
+            Attn = activation(Attn)
+        key_mask = torch.ones(N+1, device=Attn.device)
+        key_mask[N] = 0
+        Attn = Attn * key_mask
 
     key = torch.einsum('ij, BNj -> BNi', (P_full,Z))
-    Output = torch.einsum('BNM,ML, BLi -> BNi', (Attn,A,key))
+    output = torch.einsum('BNM, BMi -> BNi', (Attn,key))
+    
+    if isinstance(activation, nn.Softmax):
+        return output
 
-    return Output / N
+    return output / N
 
 
 # The Linear Transformer module
