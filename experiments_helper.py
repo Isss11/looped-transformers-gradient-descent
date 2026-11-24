@@ -52,8 +52,12 @@ MODEL_STYLES = {
 # Model construction and training
 ####################################
 
-def build_transformer(model_type, count, head_count, d, var, attention_type='linear'):
-    """Construct the requested architecture with linear or softmax attention."""
+def build_transformer(model_type, count, head_count, d, var, attention_type='linear', learn_u=False):
+    """Construct the requested architecture with linear or softmax attention.
+
+    `learn_u=True` (looped models only) adds the learnable bias vector u, the
+    bottom row of the value matrix in Gatmiry et al. (2024). It defaults to False (u = 0).
+    """
     if attention_type == 'linear':
         activation = None
     elif attention_type == 'softmax':
@@ -68,22 +72,31 @@ def build_transformer(model_type, count, head_count, d, var, attention_type='lin
     else:
         raise ValueError(f'Unsupported model type: {model_type}')
 
+    if learn_u:
+        if model_type != 'looped':
+            raise ValueError('learn_u is only supported for looped models')
+        return model_class(count, head_count, d, var, activation=activation, learn_u=True)
     return model_class(count, head_count, d, var, activation=activation)
 
 
-def step(allparam, optimizer, clip_r=None):
+def step(params, optimizer, clip_r=None):
     """Take an optimizer step, optionally clipping the gradient norm first.
 
-    With `clip_r=None` (default) no clipping is applied. Otherwise the gradient
-    is rescaled in place so its norm is at most `clip_r`. The step is skipped if
+    `params` is one parameter tensor (e.g. `model.allparam`) or a list of them
+    (e.g. `[model.allparam, model.u]`); the norm is taken jointly over all of them.
+    With `clip_r=None` (default) no clipping is applied. Otherwise the gradients
+    are rescaled in place so their joint norm is at most `clip_r`. The step is skipped if
     the gradient norm is not finite. Returns the pre-clipping gradient norm.
     """
-    grad_all = allparam.grad
-    norm_p = grad_all.norm().item()
+    if isinstance(params, torch.Tensor):
+        params = [params]
+    grads = [param.grad for param in params if param.grad is not None]
+    norm_p = torch.sqrt(sum(grad.pow(2).sum() for grad in grads)).item()
 
     if clip_r is not None:
         if norm_p > clip_r:
-            grad_all.mul_(clip_r / norm_p)
+            for grad in grads:
+                grad.mul_(clip_r / norm_p)
 
     if np.isfinite(norm_p):
         optimizer.step()
@@ -94,7 +107,8 @@ def step(allparam, optimizer, clip_r=None):
 def run_experiment_suite(seeds, n_layers_loops, model_types, filename, context_lengths=None,
                          data_modes: list[DataMode] = None, head_counts: list[int] | None = None,
                          attention_type='linear', clip=True,
-                         freeze_p=False):  # [P-FIX] added freeze_p argument
+                         freeze_p=False,  # [P-FIX] added freeze_p argument
+                         learn_u=False):
     """
     Train every requested run and save all histories to `filename`.
 
@@ -105,6 +119,12 @@ def run_experiment_suite(seeds, n_layers_loops, model_types, filename, context_l
     of P, giving the Gatmiry et al. (2024) parameterization P = [[0, 0], [0, 1]]
     (u = 0 always holds because the model has no u parameter). Only Q (= A) is
     trained. The default `False` keeps the earlier behavior, where that block is trained.
+
+    `learn_u=True` (looped models only) also trains the bias vector u, the bottom
+    row of the value matrix (P = [[0, 0], [u^T, 1]] when combined with freeze_p=True).
+    Snapshots of u are recorded at the same stride as allparam, saved under
+    'u_hist_dict' in `filename`, and the function then returns
+    `(hist_dict, u_hist_dict)` instead of only `hist_dict`.
 
     `context_lengths` defaults to [N], and `data_modes` defaults to [normal_data_mode].
     `head_counts` defaults to [n_head]. `attention_type` selects 'linear' (default)
@@ -142,18 +162,26 @@ def run_experiment_suite(seeds, n_layers_loops, model_types, filename, context_l
     keys = [key if attention_type == 'linear' else key + (attention_type,)
             for key in base_keys]
 
+    if learn_u and any(model_type != 'looped' for model_type in model_types):
+        raise ValueError('learn_u is only supported for looped models')
+
     hist_dict = {}
+    u_hist_dict = {}
     for run_index, key in enumerate(keys, start=1):
         seed, count, model_type, context_length, data_mode, head_count = key[:6]
         print(f'Run {run_index}/{len(keys)}: seed={seed}, count={count}, type={model_type}, '
               f'N={context_length}, mode={data_mode}, heads={head_count}, attention={attention_type}, '
-              f'freeze_p={freeze_p}')  # [P-FIX] log freeze_p
+              f'freeze_p={freeze_p}, learn_u={learn_u}')  # [P-FIX] log freeze_p
         hist_dict[key] = []
+        if learn_u:
+            u_hist_dict[key] = []
 
         torch.manual_seed(seed)
         model = build_transformer(
             model_type, count, head_count, d, var, attention_type=attention_type,
+            learn_u=learn_u,
         ).to(device)
+        step_params = [model.allparam, model.u] if learn_u else model.allparam
 
         # [P-FIX] Zero the random initialization of P's top-left block.
         if freeze_p:
@@ -172,6 +200,8 @@ def run_experiment_suite(seeds, n_layers_loops, model_types, filename, context_l
             start = time.time()
             if t % hist_stride == 0:
                 hist_dict[key].append(model.allparam.detach().clone())
+                if learn_u:
+                    u_hist_dict[key].append(model.u.detach().clone())
 
             Z, y = generate_data(data_mode, context_length, d, B)
             Z = Z.to(device)
@@ -184,7 +214,7 @@ def run_experiment_suite(seeds, n_layers_loops, model_types, filename, context_l
             if freeze_p:
                 model.allparam.grad[:, :, 0].zero_()
 
-            grad_norm = step(model.allparam, optimizer, clip_r=run_clip_r)
+            grad_norm = step(step_params, optimizer, clip_r=run_clip_r)
 
             if not np.isfinite(grad_norm):
                 print(f'[DEBUG] [Norm]: infinite gradient norm at iteration {t}.')
@@ -203,6 +233,11 @@ def run_experiment_suite(seeds, n_layers_loops, model_types, filename, context_l
         print(f'Finished seed={seed}, count={count}, type={model_type}, N={context_length}, '
               f'mode={data_mode}, heads={head_count}, attention={attention_type}.')
 
+    if learn_u:
+        torch.save({'hist_dict': hist_dict, 'u_hist_dict': u_hist_dict}, filename)
+        print(f'Saved histories to {filename}')
+        return hist_dict, u_hist_dict
+
     torch.save({'hist_dict': hist_dict}, filename)
     print(f'Saved histories to {filename}')
     return hist_dict
@@ -214,13 +249,15 @@ def run_experiment_suite(seeds, n_layers_loops, model_types, filename, context_l
 
 def compute_loss_dict(hist_dict, U=None, D=None, test_seed=None,
                       data_mode: DataMode | None = None, head_counts: list[int] | None = None,
-                      attention_type: str | None = None):
+                      attention_type: str | None = None, u_hist_dict=None):
     """Evaluate every checkpoint on a fixed test batch.
 
     By default, each run is evaluated on the data mode and attention type in its
     key. Pass `data_mode` or `attention_type` to override it for every run;
     U and D transform covariates. `head_counts` is accepted for compatibility
-    with multi-head sweeps.
+    with multi-head sweeps. Pass the `u_hist_dict` returned by
+    `run_experiment_suite(..., learn_u=True)` to evaluate runs with their learned u
+    (runs missing from it are evaluated with u = 0).
     """
     if head_counts is None:
         head_counts = [n_head]
@@ -251,9 +288,11 @@ def compute_loss_dict(hist_dict, U=None, D=None, test_seed=None,
         Z, y = generate_data(run_mode, context_length, d, B, U=U, D=D)
         Z = Z.to(device)
         y = y.to(device)
+        u_history = u_hist_dict.get(key) if u_hist_dict is not None else None
         model = build_transformer(
             model_type, count, head_count, d, var,
             attention_type=run_attention_type,
+            learn_u=u_history is not None,
         ).to(device)
 
         for iteration in range(0, max_iters, stride):
@@ -268,6 +307,8 @@ def compute_loss_dict(hist_dict, U=None, D=None, test_seed=None,
 
             with torch.no_grad():
                 model.allparam.copy_(snapshot.to(device))
+                if u_history is not None:
+                    model.u.copy_(u_history[history_index].to(device))
                 test_losses[iteration // stride] = in_context_loss(model, Z, y).item()
 
         loss_dict[key] = test_losses
@@ -554,7 +595,7 @@ def plot_parameter_matrices(hist_dict, plot_seed, n_layers_loops, model_types, n
                 )
 
                 for head in range(plotted_head_count):
-                    for matrix_type, matrix_name in enumerate(('P', 'Q')):
+                    for matrix_type, matrix_name in enumerate(('B', 'A')):
                         ax = axs[matrix_type * n_head + head, 0]
                         matrix = snapshot[0, head, matrix_type]
                         im = ax.imshow(matrix, cmap='gray_r')

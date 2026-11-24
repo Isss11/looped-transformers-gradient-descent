@@ -39,43 +39,31 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # For linear attention, activation = None
 # For standard attention, activation(x) = torch.nn.functional.softmax(x, dim = 2)
 # For ReLU attention, activation(x) = torch.nn.relu(x)
-def attention(P,Q,Z, activation = None):
+#
+# u is the optional "bias" vector from Gatmiry et al. (2024): the first d entries
+# of the bottom row of the value matrix, P_full = [[P, 0], [u^T, 1]]. With
+# u = None (default), the bottom row is [0, ..., 0, 1], as before.
+def attention(P,Q,Z, activation = None, u = None):
     B= Z.shape[0]
     N = Z.shape[1]-1
     d = Z.shape[2]-1
 
-    P_full =  torch.cat([P,torch.zeros(1,d).to(device)],dim=0)
-    P_full =  torch.cat([P_full,torch.zeros(d+1,1).to(device)],dim=1)
-    P_full[d,d] = 1
+    bottom_row = torch.zeros(1, d, device=P.device) if u is None else u.reshape(1, d)
+    P_full =  torch.cat([P, bottom_row],dim=0)
+    last_col = torch.zeros(d+1, 1, device=P.device)
+    last_col[d, 0] = 1
+    P_full =  torch.cat([P_full, last_col],dim=1)
     Q_full = torch.cat([Q, torch.zeros(1,d).to(device)],dim=0)
     Q_full = torch.cat([Q_full, torch.zeros(d+1,1).to(device)],dim=1)
 
+    A = torch.eye(N+1).to(device)
+    A[N,N] = 0
     Attn = torch.einsum('BNi, ij, BMj -> BNM', (Z,Q_full,Z))
-
-    # The query token (index N) must not act as a key.
-    if isinstance(activation, nn.Softmax):
-        # Scale scores as in the original Transformer, then mask the query
-        # token with -inf so softmax gives it zero weight and normalizes
-        # over the N context tokens only.
-        Attn = Attn / (d ** 0.5)
-        Attn[:, :, N] = -torch.inf
+    if activation is not None:
         Attn = activation(Attn)
-    else:
-        # Linear / ReLU attention: zero out the query token's column after
-        # the activation (out-of-place, so autograd through ReLU stays valid).
-        if activation is not None:
-            Attn = activation(Attn)
-        key_mask = torch.ones(N+1, device=Attn.device)
-        key_mask[N] = 0
-        Attn = Attn * key_mask
-
     key = torch.einsum('ij, BNj -> BNi', (P_full,Z))
-    output = torch.einsum('BNM, BMi -> BNi', (Attn,key))
-    
-    if isinstance(activation, nn.Softmax):
-        return output
-
-    return output / N
+    Output = torch.einsum('BNM,ML, BLi -> BNi', (Attn,A,key))
+    return Output /N
 
 
 # The Linear Transformer module
@@ -121,12 +109,24 @@ class Transformer_F(nn.Module):
 # It repeatedly applies the same residual-attention block, sharing parameters
 # across all loops. The leading allparam dimension is kept at size 1 so that
 # the stored P/Q matrices follow the same layout as Transformer_F.
+#
+# learn_u=True adds a learnable bias vector u per head (the bottom row of the
+# value matrix, see `attention`), stored as `self.u` with shape (1, n_head, d)
+# and initialized like allparam. Gatmiry et al. (2024, Thm 4.1) show the optimal
+# u is 0. With learn_u=False (default) there is no u parameter, so u = 0 always.
 class Transformer_F_Looped(nn.Module):
-    def __init__(self, n_loop, n_head, d, var, activation=None):
+    def __init__(self, n_loop, n_head, d, var, activation=None, learn_u=False):
         super(Transformer_F_Looped, self).__init__()
         self.register_parameter('allparam', torch.nn.Parameter(torch.zeros(1, n_head, 2, d, d)))
         with torch.no_grad():
             self.allparam.normal_(0, var)
+        self.learn_u = learn_u
+        if learn_u:
+            self.register_parameter('u', torch.nn.Parameter(torch.zeros(1, n_head, d)))
+            with torch.no_grad():
+                self.u.normal_(0, var)
+        else:
+            self.u = None
         self.n_loop = n_loop
         self.n_head = n_head
         self.activation = activation
@@ -138,7 +138,8 @@ class Transformer_F_Looped(nn.Module):
             for j in range(self.n_head):
                 Pij = self.allparam[0, j, 0, :, :]
                 Qij = self.allparam[0, j, 1, :, :]
-                residues = residues + attention(Pij, Qij, Zi, activation=self.activation)
+                uj = None if self.u is None else self.u[0, j]
+                residues = residues + attention(Pij, Qij, Zi, activation=self.activation, u=uj)
             Z = Zi + residues
         return Z
 
