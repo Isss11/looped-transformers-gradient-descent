@@ -76,11 +76,11 @@ def attention(P,Q,Z, activation = None, u = None):
 # - P matrix at layer i, head j is allparam[i,j,0,:,:]
 # - Q matrix at layer i, head j is allparam[i,j,1,:,:]
 class Transformer_F(nn.Module):
-    def __init__(self, n_layer, n_head, d, var, activation=None):
+    def __init__(self, n_layer, n_head, d, std, activation=None):
         super(Transformer_F, self).__init__()
         self.register_parameter('allparam', torch.nn.Parameter(torch.zeros(n_layer, n_head, 2, d, d)))
         with torch.no_grad():
-            self.allparam.normal_(0,var)
+            self.allparam.normal_(0,std)
         self.n_layer = n_layer
         self.n_head = n_head
         self.activation = activation
@@ -156,10 +156,6 @@ def in_context_loss(model, Z, y):
     output = model(Z)
     diff = output[:,N,d] + y
 
-    # Restriction to ensure that differences don't overflow and cause infinite loss
-    # clamped_diff = torch.nan_to_num(torch.clamp(diff, -5, 5), nan=0.0)
-
-    # loss = ((clamped_diff)**2).mean()
     loss = ((diff)**2).mean()
 
     return loss

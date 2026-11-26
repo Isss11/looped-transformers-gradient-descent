@@ -1,6 +1,7 @@
 """Shared configuration, training, evaluation, and plotting helpers for
 the experiment notebooks (regular_experiments.ipynb, etc.)."""
 
+from itertools import product
 import os
 import time
 
@@ -25,17 +26,16 @@ from linear_transformer import (
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 lr = 0.001
-clip_r = 1000
 alg = 'adam'
 
 normal_data_mode = DataMode("normal")
 
-N = 10     # context length (no assumption given in paper)
+N = 20     # context length (no assumption given in paper)
 d = 5        # dimension
 
 n_head = 1  # 1-headed attention
 B = 4000  # 4000 minibatch size
-var = 0.05  # initializations scale of transformer parameter
+var = 0.0001  # initializations scale of transformer parameter
 max_iters = 10000  # Number of Iterations to run
 hist_stride = 1  # stride for saved model paramters in `train.ipynb'
 stride = 100
@@ -106,7 +106,7 @@ def step(params, optimizer, clip_r=None):
 
 def run_experiment_suite(seeds, n_layers_loops, model_types, filename, context_lengths=None,
                          data_modes: list[DataMode] = None, head_counts: list[int] | None = None,
-                         attention_type='linear', clip=True,
+                         attention_types: list[str] | None = None, clip=1000,
                          freeze_p=False,  # [P-FIX] added freeze_p argument
                          learn_u=False):
     """
@@ -127,8 +127,9 @@ def run_experiment_suite(seeds, n_layers_loops, model_types, filename, context_l
     `(hist_dict, u_hist_dict)` instead of only `hist_dict`.
 
     `context_lengths` defaults to [N], and `data_modes` defaults to [normal_data_mode].
-    `head_counts` defaults to [n_head]. `attention_type` selects 'linear' (default)
-    or 'softmax' attention without changing the model/data module.
+    `head_counts` defaults to [n_head]. `attention_types` lists the attention types
+    to train ('linear' and/or 'softmax'); it defaults to ['linear']. Linear runs keep
+    the six-field key, other attention types append it as a seventh key field.
     """
     if context_lengths is None:
         context_lengths = [N]
@@ -145,10 +146,15 @@ def run_experiment_suite(seeds, n_layers_loops, model_types, filename, context_l
     else:
         head_counts = list(head_counts)
 
-    if attention_type not in {'linear', 'softmax'}:
-        raise ValueError(f'Unsupported attention type: {attention_type}')
-
-    run_clip_r = clip_r if clip else None
+    if attention_types is None:
+        attention_types = ['linear']
+    elif isinstance(attention_types, str):
+        attention_types = [attention_types]
+    else:
+        attention_types = list(attention_types)
+    for attention_type in attention_types:
+        if attention_type not in {'linear', 'softmax'}:
+            raise ValueError(f'Unsupported attention type: {attention_type}')
 
     base_keys = [(seed, count, model_type, context_length, data_mode, head_count)
                  for seed in seeds
@@ -157,10 +163,12 @@ def run_experiment_suite(seeds, n_layers_loops, model_types, filename, context_l
                  for context_length in context_lengths
                  for data_mode in training_modes
                  for head_count in head_counts]
+
     # Keep the existing six-field key format for linear runs; tag softmax runs
     # so their histories remain distinguishable and compatible with existing plots.
     keys = [key if attention_type == 'linear' else key + (attention_type,)
-            for key in base_keys]
+            for key in base_keys
+            for attention_type in attention_types]
 
     if learn_u and any(model_type != 'looped' for model_type in model_types):
         raise ValueError('learn_u is only supported for looped models')
@@ -169,6 +177,7 @@ def run_experiment_suite(seeds, n_layers_loops, model_types, filename, context_l
     u_hist_dict = {}
     for run_index, key in enumerate(keys, start=1):
         seed, count, model_type, context_length, data_mode, head_count = key[:6]
+        attention_type = _attention_type(key)
         print(f'Run {run_index}/{len(keys)}: seed={seed}, count={count}, type={model_type}, '
               f'N={context_length}, mode={data_mode}, heads={head_count}, attention={attention_type}, '
               f'freeze_p={freeze_p}, learn_u={learn_u}')  # [P-FIX] log freeze_p
@@ -214,7 +223,7 @@ def run_experiment_suite(seeds, n_layers_loops, model_types, filename, context_l
             if freeze_p:
                 model.allparam.grad[:, :, 0].zero_()
 
-            grad_norm = step(step_params, optimizer, clip_r=run_clip_r)
+            grad_norm = step(step_params, optimizer, clip_r=clip)
 
             if not np.isfinite(grad_norm):
                 print(f'[DEBUG] [Norm]: infinite gradient norm at iteration {t}.')
@@ -249,11 +258,13 @@ def run_experiment_suite(seeds, n_layers_loops, model_types, filename, context_l
 
 def compute_loss_dict(hist_dict, U=None, D=None, test_seed=None,
                       data_mode: DataMode | None = None, head_counts: list[int] | None = None,
-                      attention_type: str | None = None, u_hist_dict=None):
+                      attention_types: list[str] | None = None, u_hist_dict=None):
     """Evaluate every checkpoint on a fixed test batch.
 
-    By default, each run is evaluated on the data mode and attention type in its
-    key. Pass `data_mode` or `attention_type` to override it for every run;
+    Each run is evaluated with the attention type in its key, and by default on
+    the data mode in its key. Pass `data_mode` to override the data mode for every
+    run. `attention_types` (e.g. ['linear', 'softmax']) restricts evaluation to runs
+    with those attention types; None evaluates every run;
     U and D transform covariates. `head_counts` is accepted for compatibility
     with multi-head sweeps. Pass the `u_hist_dict` returned by
     `run_experiment_suite(..., learn_u=True)` to evaluate runs with their learned u
@@ -272,8 +283,9 @@ def compute_loss_dict(hist_dict, U=None, D=None, test_seed=None,
         seed, count, model_type, context_length = key_tuple[:4]
         train_data_mode = key_tuple[4] if len(key_tuple) > 4 else normal_data_mode
         head_count = key_tuple[5] if len(key_tuple) > 5 else n_head
-        saved_attention_type = key_tuple[6] if len(key_tuple) > 6 else 'linear'
-        run_attention_type = attention_type or saved_attention_type
+        run_attention_type = _attention_type(key_tuple)
+        if attention_types is not None and run_attention_type not in attention_types:
+            continue
 
         print(key)
         print(f"Testing model: seed={seed}, count={count}, type={model_type}, "
@@ -438,6 +450,11 @@ def compute_data_condition_numbers(Z):
 # Plotting
 ####################################
 
+def _attention_type(key):
+    """Attention type stored in a run key (seventh field); linear runs omit it."""
+    return key[6] if len(key) > 6 else 'linear'
+
+
 def _data_mode_name(key):
     if len(key) > 4:
         data_mode = key[4]
@@ -447,6 +464,28 @@ def _data_mode_name(key):
             return data_mode.name
         return data_mode
     return normal_data_mode.name
+
+
+RUN_LABEL_FIELDS = ('heads', 'attention', 'distribution')
+
+
+def _run_label_parts(key, labels):
+    """Describe a run key with the requested fields, in the order given.
+
+    `labels` may contain 'heads' (e.g. 'heads=2'), 'attention' (e.g. 'softmax attention')
+    and 'distribution' (e.g. 'trained on normal'). Returns a list of strings.
+    """
+    parts = []
+    for field in labels:
+        if field == 'heads':
+            parts.append(f'heads={key[5] if len(key) > 5 else n_head}')
+        elif field == 'attention':
+            parts.append(f'{_attention_type(key)} attention')
+        elif field == 'distribution':
+            parts.append(f'trained on {_data_mode_name(key)}')
+        else:
+            raise ValueError(f'Unknown label field {field!r}; expected one of {RUN_LABEL_FIELDS}')
+    return parts
 
 
 def _add_bottom_legend(fig, ax, fontsize=9, ncol=2, top=1):
@@ -464,17 +503,40 @@ def _add_bottom_legend(fig, ax, fontsize=9, ncol=2, top=1):
     fig.tight_layout(rect=(0, 0.04 + 0.045 * nrows, 1, top))
 
 
+# Distinct colors for loss curves; each curve in a figure takes the next one (cycling after 20).
+CURVE_COLORS = [
+    '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
+    '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf',
+    '#000075', '#f58231', '#3cb44b', '#800000', '#911eb4',
+    '#9a6324', '#f032e6', '#469990', '#808000', '#42d4f4',
+]
+
+
 def plot_loss_curves(loss_dict, n_layers_loops, model_types, iterations,
                      fig_dir='figures', filename='figure_two_test_loss_layered_vs_looped.pdf',
                      seeds=None, log_scale=True, figsize=(9, 6),
-                     test_data_mode=None, head_count=None):
+                     test_data_mode=None, head_count=None, head_counts=None, max_iters=None,
+                     attention_types=None, labels=None):
     """Plot mean +/- std test loss over seeds for each (count, model_type), one figure per context length.
+
+    `max_iters` truncates every curve to the points whose iteration is below `max_iters` (None plots all).
 
     `seeds=None` uses all seeds; each figure is saved as `filename` with `_N{context_length}` appended to the stem.
     When `test_data_mode` is set, training-mode curves share one figure for that test distribution.
+    When `head_counts` is given, each head count (key[5]) gets its own curve and color on the same figure.
+    When `attention_types` is given (e.g. ['linear', 'softmax']), each attention type gets its own
+    labeled curve and color as well; combined with `head_counts`, every (heads, attention) pair does.
+
+    `labels` lists what each curve's legend entry shows after the model name: any of
+    'heads', 'attention' and 'distribution' (training distribution), in that order given.
+    None shows the training distribution, plus heads/attention when `head_counts`/`attention_types` are set.
     """
+    if labels is None:
+        labels = (['heads'] if head_counts else []) + (['attention'] if attention_types else []) + ['distribution']
     stem, ext = os.path.splitext(filename)
-    colors = dict(zip(n_layers_loops, ['tab:blue', 'tab:orange', 'tab:green', 'tab:red']))
+    iterations = np.asarray(iterations)
+    n_points = len(iterations) if max_iters is None else int((iterations < max_iters).sum())
+    iterations = iterations[:n_points]
 
     data_modes = list(dict.fromkeys(_data_mode_name(key) for key in loss_dict))
     if test_data_mode is None:
@@ -487,21 +549,25 @@ def plot_loss_curves(loss_dict, n_layers_loops, model_types, iterations,
         })]
     for context_length, data_mode in run_configurations:
         fig, ax = plt.subplots(1, 1, figsize=figsize)
+        curve_index = 0  # every curve in this figure gets its own color
 
         for count in n_layers_loops:
             for model_type in model_types:
                 line_style, make_label = MODEL_STYLES[model_type]
                 training_modes = data_modes if test_data_mode is not None else [data_mode]
-                for training_mode in training_modes:
+                curve_groups = list(product(head_counts or [None], attention_types or [None]))
+                for training_mode, (curve_heads, curve_attention) in product(training_modes, curve_groups):
                     run_keys = [
                         key for key in loss_dict
                         if key[1] == count and key[2] == model_type and key[3] == context_length
                         and _data_mode_name(key) == training_mode
                         and (seeds is None or key[0] in seeds)
+                        and (curve_heads is None or (len(key) > 5 and key[5] == curve_heads))
+                        and (curve_attention is None or _attention_type(key) == curve_attention)
                     ]
                     if not run_keys:
                         continue
-                    run_losses = torch.stack([loss_dict[key] for key in run_keys])
+                    run_losses = torch.stack([loss_dict[key][:n_points] for key in run_keys])
                     valid = torch.isfinite(run_losses)
                     n_valid = valid.sum(dim=0)
                     safe_losses = torch.where(valid, run_losses, torch.zeros_like(run_losses))
@@ -514,12 +580,12 @@ def plot_loss_curves(loss_dict, n_layers_loops, model_types, iterations,
                         torch.zeros_like(run_losses),
                     ).sum(dim=0) / n_valid.clamp_min(1)
                     std_loss = variance.sqrt()
-                    color = colors[count]
-                    if test_data_mode is not None:
-                        color = plt.get_cmap('tab10')(data_modes.index(training_mode))
+                    color = CURVE_COLORS[curve_index % len(CURVE_COLORS)]
+                    curve_index += 1
+                    label = ', '.join([make_label(count)] + _run_label_parts(run_keys[0], labels))
                     ax.plot(
                         iterations, mean_loss.numpy(), color=color, linestyle=line_style,
-                        lw=2.2, label=f'{make_label(count)} (trained on {training_mode})',
+                        lw=2.2, label=label,
                     )
                     multiple = n_valid > 1
                     lower = torch.where(multiple, mean_loss - std_loss, torch.nan)
@@ -558,24 +624,40 @@ def plot_loss_curves(loss_dict, n_layers_loops, model_types, iterations,
 
 
 def plot_parameter_matrices(hist_dict, plot_seed, n_layers_loops, model_types, n_head,
-                            hist_stride=1, fig_dir='figures', head_count=None):
+                            hist_stride=1, fig_dir='figures', head_count=None, labels=None,
+                            matrices=None):
     """Plot layer/loop-0 P/Q matrices from each run's last finite checkpoint.
+
+    `matrices` lists which matrices to plot ('B' for P, 'A' for Q); None plots both.
+    `labels` lists which run fields the figure title shows ('heads', 'attention',
+    'distribution'); None shows all three.
 
     Layered models have a separate block per layer; looped models share one block.
     """
+    if labels is None:
+        labels = ['heads', 'attention', 'distribution']
+    if matrices is None:
+        matrices = ['B', 'A']
+    matrix_indices = {'B': 0, 'A': 1}
+    unknown = [name for name in matrices if name not in matrix_indices]
+    if unknown or not matrices:
+        raise ValueError(f"matrices must be a non-empty list drawn from 'A' and 'B'; got {matrices}")
     plotted_head_count = n_head if head_count is None else head_count
     data_modes = list(dict.fromkeys(_data_mode_name(key) for key in hist_dict))
+    attention_types = list(dict.fromkeys(_attention_type(key) for key in hist_dict))
     run_configurations = sorted({
-        (key[3], _data_mode_name(key)) for key in hist_dict
+        (key[3], _data_mode_name(key), _attention_type(key)) for key in hist_dict
     })
-    for context_length, data_mode in run_configurations:
+    matrix_suffix = '' if sorted(matrices) == ['A', 'B'] else f'_{"".join(matrices)}'
+    for context_length, data_mode, attention_type in run_configurations:
         for count in n_layers_loops:
             for model_type in model_types:
                 key = next((candidate for candidate in hist_dict
                             if candidate[:4] == (plot_seed, count, model_type, context_length)
-                            and _data_mode_name(candidate) == data_mode), None)
+                            and _data_mode_name(candidate) == data_mode
+                            and _attention_type(candidate) == attention_type), None)
                 if key is None:
-                    print(f'No saved run found for {(plot_seed, count, model_type, context_length, data_mode)}; skipping parameter plot.')
+                    print(f'No saved run found for {(plot_seed, count, model_type, context_length, data_mode, attention_type)}; skipping parameter plot.')
                     continue
                 history = hist_dict[key]
                 snapshot_index = next(
@@ -589,15 +671,15 @@ def plot_parameter_matrices(hist_dict, plot_seed, n_layers_loops, model_types, n
 
                 snapshot = history[snapshot_index].detach().cpu()
                 fig, axs = plt.subplots(
-                    2 * plotted_head_count, 1,
-                    figsize=(4, 4 * 2 * plotted_head_count),
+                    len(matrices) * plotted_head_count, 1,
+                    figsize=(4, 4 * len(matrices) * plotted_head_count),
                     squeeze=False,
                 )
 
                 for head in range(plotted_head_count):
-                    for matrix_type, matrix_name in enumerate(('B', 'A')):
-                        ax = axs[matrix_type * n_head + head, 0]
-                        matrix = snapshot[0, head, matrix_type]
+                    for row_group, matrix_name in enumerate(matrices):
+                        ax = axs[row_group * plotted_head_count + head, 0]
+                        matrix = snapshot[0, head, matrix_indices[matrix_name]]
                         im = ax.imshow(matrix, cmap='gray_r')
                         for row in range(matrix.shape[0]):
                             for col in range(matrix.shape[1]):
@@ -610,28 +692,41 @@ def plot_parameter_matrices(hist_dict, plot_seed, n_layers_loops, model_types, n
                         ax.set_title(title)
                         fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
-                fig.suptitle(
-                    f'{model_type}: count={count}, N={context_length}, seed={plot_seed}, '
-                    f'mode={data_mode}, heads={plotted_head_count}, '
-                    f'checkpoint={snapshot_index * hist_stride}',
-                    fontsize=14,
-                )
+                title_parts = [f'count={count}', f'N={context_length}', f'seed={plot_seed}']
+                title_parts += _run_label_parts(key, labels)
+                title_parts.append(f'checkpoint={snapshot_index * hist_stride}')
+                fig.suptitle(f'{model_type}: {", ".join(title_parts)}', fontsize=14)
                 fig.tight_layout(rect=(0, 0, 1, 0.93))
                 mode_suffix = f'_{data_mode}' if len(data_modes) > 1 else ''
+                attention_suffix = f'_attn-{attention_type}' if len(attention_types) > 1 else ''
                 fig.savefig(
                     os.path.join(
                         fig_dir,
                         f'figure_two_parameters_{model_type}_count{count}_N{context_length}'
-                        f'{mode_suffix}_heads-{plotted_head_count}_seed{plot_seed}.pdf'),
+                        f'{mode_suffix}{attention_suffix}_heads-{plotted_head_count}{matrix_suffix}'
+                        f'_seed{plot_seed}.pdf'),
                     dpi=600,
                     bbox_inches='tight',
                 )
                 plt.show()
 
 
-def plot_dist_to_identity(dist_dict, n_layers_loops, iterations, fig_dir='figures', head_count=None):
-    """Plot loop-0 mean +/- std distance-to-identity for Q (labeled A) only."""
+def plot_dist_to_identity(dist_dict, n_layers_loops, iterations, fig_dir='figures', head_count=None,
+                          labels=None):
+    """Plot loop-0 mean +/- std distance-to-identity for Q (labeled A) only.
+
+    Runs with different attention types (key[6]) share a figure, with one color per type.
+    `labels` lists what each legend entry shows ('heads', 'attention', 'distribution');
+    None shows attention and distribution.
+    """
+    if labels is None:
+        labels = ['attention', 'distribution']
     data_modes = list(dict.fromkeys(_data_mode_name(key) for key in dist_dict))
+    attention_types = list(dict.fromkeys(_attention_type(key) for key in dist_dict))
+    attention_colors = {
+        attention_type: color for attention_type, color in zip(
+            attention_types, ['tab:orange', 'tab:blue', 'tab:green', 'tab:red'])
+    }
     run_configurations = sorted({
         (key[3], _data_mode_name(key)) for key in dist_dict
     })
@@ -641,14 +736,15 @@ def plot_dist_to_identity(dist_dict, n_layers_loops, iterations, fig_dir='figure
 
             matrix_type = 1  # Q parameter; shown as A in the identity plots.
             matrix_name = 'A'
-            for model_type, line_style, label in (
+            for (model_type, line_style, label), attention_type in product((
                 ('layered', '-', 'baseline'),
                 ('looped', '--', 'looping (shared weights)'),
-            ):
+            ), attention_types):
                 run_keys = [
                     key for key in dist_dict
                     if key[1] == count and key[2] == model_type and key[3] == context_length
                     and _data_mode_name(key) == data_mode
+                    and _attention_type(key) == attention_type
                 ]
                 if not run_keys:
                     continue
@@ -668,10 +764,10 @@ def plot_dist_to_identity(dist_dict, n_layers_loops, iterations, fig_dir='figure
                 ).sum(dim=0) / n_valid.clamp_min(1)
                 std = variance.sqrt()
 
-                color = 'tab:orange'
+                color = attention_colors[attention_type]
                 ax.plot(
                     iterations, mean.numpy(), color=color, linestyle=line_style,
-                    lw=2, label=f'{label} {matrix_name} (trained on {data_mode})',
+                    lw=2, label=', '.join([f'{label} {matrix_name}'] + _run_label_parts(run_keys[0], labels)),
                 )
                 multiple = n_valid > 1
                 lower = torch.where(multiple, mean - std, torch.nan)
