@@ -42,10 +42,42 @@ stride = 100
 
 TEST_SEED = 99
 
+LOG_DIR = 'log'  # where experiment histories and results are saved
+FIGURES_DIR = 'figures'  # where experiment figures are saved
+
 MODEL_STYLES = {
     'layered': ('-', lambda count: f'baseline (L = {count})'),
     'looped': ('--', lambda count: f'looping (l=1, loop={count})'),
 }
+
+
+def create_log_dir():
+    """Create LOG_DIR if it does not exist yet."""
+    os.makedirs(LOG_DIR, exist_ok=True)
+
+
+def create_fig_dir(*names):
+    """Create and return the figure directory FIGURES_DIR/<names...> for an experiment."""
+    fig_dir = os.path.join(FIGURES_DIR, *names)
+    os.makedirs(fig_dir, exist_ok=True)
+    return fig_dir
+
+
+def save_results(save_config, filename):
+    """Save `save_config` (anything torch.save accepts, usually a dict) to `filename`."""
+    torch.save(save_config, filename)
+    print(f'Saved results to {filename}')
+
+
+def load_results(filename, map_location='cpu'):
+    """Load and return an object saved with `save_results`.
+
+    weights_only=False is needed because result files store DataMode objects,
+    numpy arrays and strings, not just tensors. Only load files you created yourself.
+    """
+    results = torch.load(filename, map_location=map_location, weights_only=False)
+    print(f'Loaded results from {filename}')
+    return results
 
 
 ####################################
@@ -243,12 +275,10 @@ def run_experiment_suite(seeds, n_layers_loops, model_types, filename, context_l
               f'mode={data_mode}, heads={head_count}, attention={attention_type}.')
 
     if learn_u:
-        torch.save({'hist_dict': hist_dict, 'u_hist_dict': u_hist_dict}, filename)
-        print(f'Saved histories to {filename}')
+        save_results({'hist_dict': hist_dict, 'u_hist_dict': u_hist_dict}, filename)
         return hist_dict, u_hist_dict
 
-    torch.save({'hist_dict': hist_dict}, filename)
-    print(f'Saved histories to {filename}')
+    save_results({'hist_dict': hist_dict}, filename)
     return hist_dict
 
 
@@ -513,7 +543,7 @@ CURVE_COLORS = [
 
 
 def plot_loss_curves(loss_dict, n_layers_loops, model_types, iterations,
-                     fig_dir='figures', filename='figure_two_test_loss_layered_vs_looped.pdf',
+                     fig_dir=FIGURES_DIR, filename='figure_two_test_loss_layered_vs_looped.pdf',
                      seeds=None, log_scale=True, figsize=(9, 6),
                      test_data_mode=None, head_count=None, head_counts=None, max_iters=None,
                      attention_types=None, labels=None):
@@ -624,7 +654,7 @@ def plot_loss_curves(loss_dict, n_layers_loops, model_types, iterations,
 
 
 def plot_parameter_matrices(hist_dict, plot_seed, n_layers_loops, model_types, n_head,
-                            hist_stride=1, fig_dir='figures', head_count=None, labels=None,
+                            hist_stride=1, fig_dir=FIGURES_DIR, head_count=None, labels=None,
                             matrices=None):
     """Plot layer/loop-0 P/Q matrices from each run's last finite checkpoint.
 
@@ -711,7 +741,7 @@ def plot_parameter_matrices(hist_dict, plot_seed, n_layers_loops, model_types, n
                 plt.show()
 
 
-def plot_dist_to_identity(dist_dict, n_layers_loops, iterations, fig_dir='figures', head_count=None,
+def plot_dist_to_identity(dist_dict, n_layers_loops, iterations, fig_dir=FIGURES_DIR, head_count=None,
                           labels=None):
     """Plot loop-0 mean +/- std distance-to-identity for Q (labeled A) only.
 
@@ -805,7 +835,7 @@ def plot_dist_to_identity(dist_dict, n_layers_loops, iterations, fig_dir='figure
 
 
 def plot_loop_loss_curves(loop_loss_dict, n_layers_loops, loop_counts=None,
-                         fig_dir='figures', filename='looped_test_loss_vs_loops.pdf',
+                         fig_dir=FIGURES_DIR, filename='looped_test_loss_vs_loops.pdf',
                          seeds=None, log_scale=True, figsize=(9, 6)):
     """Plot ICL test loss versus inference loop count for looped-model checkpoints.
 
