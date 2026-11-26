@@ -6,3 +6,5 @@
 *pth
 .env
 *.pdf
+figures
+log
