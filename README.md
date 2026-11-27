@@ -46,3 +46,6 @@ pip install -r requirements.txt
 
 After setting-up the environment, you can run any of the noteboooks in any order you wish.
 However, make sure to run the cells in the order in which they're displayed, as later cells tend to depend on earlier cells.
+The only caveat for this is the cells that have a single function call that say something along the lines of `restore_results()`.
+These cells are for restoring results that have been saved to a `.pth` file, and thus should not be called unless you have run and saved results previously.
+By default, the notebook will use data/variables from the model that you loaded and trained in the current session if you don't run this cell, which is usually what is preferred.
